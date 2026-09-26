@@ -63,16 +63,32 @@ Sentence: "{sentence}"
 JSON array:"""
 
     try:
+        # UPDATED: Enforce JSON format and limit token output to prevent freezing
         response = ollama.generate(
-            model=MODEL, prompt=prompt, options={"temperature": 0.0}
+            model=MODEL, 
+            prompt=prompt, 
+            format="json",
+            options={
+                "temperature": 0.0,
+                "num_predict": 256
+            }
         )["response"]
 
-        json_start = response.find("[")
-        json_end = response.rfind("]") + 1
-        claims = json.loads(response[json_start:json_end])
+        # Directly parse the enforced JSON
+        claims = json.loads(response)
 
-        claims = [c for c in claims if len(str(c).split()) >= 3]
-        return [str(c) for c in claims] if claims else [sentence]
+        # Handle cases where Ollama wraps the array in a dictionary object
+        if isinstance(claims, dict):
+            for value in claims.values():
+                if isinstance(value, list):
+                    claims = value
+                    break
+
+        if isinstance(claims, list):
+            claims = [c for c in claims if len(str(c).split()) >= 3]
+            return [str(c) for c in claims] if claims else [sentence]
+        else:
+            return [sentence]
 
     except Exception as e:
         print(f"    (extraction failed, using full sentence as fallback: {e})")
@@ -163,10 +179,11 @@ def print_report(main_response, results):
 
 
 if __name__ == "__main__":
-    prompt = "Tell me about the life and achievements of Albert Einstein."
+    # UPDATED: Changed to a single sentence prompt to test system stability without overloading RAM
+    prompt = "The Eiffel Tower was completed in 1889 and is located in Madrid, Spain."
 
     start = time.time()
     main_response, results = detect_hallucinations(prompt, n_samples=3)
-    print(f"Total time: {time.time() - start:.1f}s")
+    print(f"\nTotal time: {time.time() - start:.1f}s")
 
     print_report(main_response, results)
