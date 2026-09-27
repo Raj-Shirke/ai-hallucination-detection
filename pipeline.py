@@ -9,7 +9,7 @@ nlp = spacy.load("en_core_web_sm")
 nli = CrossEncoder("cross-encoder/nli-deberta-v3-xsmall")
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 ENTAILMENT_IDX = 1
-MODEL = "llama3.2:3b"
+DEFAULT_MODEL = "llama3.2:3b"
 
 
 def clean_markdown(text):
@@ -20,25 +20,17 @@ def clean_markdown(text):
     return text
 
 
-def generate_samples(prompt, n_samples=3, progress_callback=None):
-    if progress_callback:
-        progress_callback(0.05, "Generating main response...")
-
+def generate_samples(prompt, model=DEFAULT_MODEL, n_samples=3):
     main_response = ollama.generate(
-        model=MODEL, prompt=prompt, options={"temperature": 0.1}
+        model=model, prompt=prompt, options={"temperature": 0.1}
     )["response"]
 
     samples = []
     for i in range(n_samples):
-        if progress_callback:
-            frac = 0.1 + 0.35 * (i / n_samples)
-            progress_callback(frac, f"Generating comparison sample {i+1}/{n_samples}...")
-
         s = ollama.generate(
-            model=MODEL, prompt=prompt, options={"temperature": 0.9}
+            model=model, prompt=prompt, options={"temperature": 0.9}
         )["response"]
         samples.append(s)
-        print(f"  sample {i+1}/{n_samples} generated")
 
     return main_response, samples
 
@@ -48,7 +40,7 @@ def split_sentences(text):
     return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
 
 
-def extract_atomic_claims(sentence):
+def extract_atomic_claims(sentence, model=DEFAULT_MODEL):
     if len(sentence.split()) < 6:
         return [sentence]
 
@@ -63,21 +55,15 @@ Sentence: "{sentence}"
 JSON array:"""
 
     try:
-        # UPDATED: Enforce JSON format and limit token output to prevent freezing
         response = ollama.generate(
-            model=MODEL, 
-            prompt=prompt, 
+            model=model,
+            prompt=prompt,
             format="json",
-            options={
-                "temperature": 0.0,
-                "num_predict": 256
-            }
+            options={"temperature": 0.0, "num_predict": 256},
         )["response"]
 
-        # Directly parse the enforced JSON
         claims = json.loads(response)
 
-        # Handle cases where Ollama wraps the array in a dictionary object
         if isinstance(claims, dict):
             for value in claims.values():
                 if isinstance(value, list):
@@ -87,11 +73,9 @@ JSON array:"""
         if isinstance(claims, list):
             claims = [c for c in claims if len(str(c).split()) >= 3]
             return [str(c) for c in claims] if claims else [sentence]
-        else:
-            return [sentence]
+        return [sentence]
 
-    except Exception as e:
-        print(f"    (extraction failed, using full sentence as fallback: {e})")
+    except Exception:
         return [sentence]
 
 
@@ -124,66 +108,41 @@ def hallucination_score(sentence, premises, premise_embeddings):
     return round(combined, 3)
 
 
-def detect_hallucinations(prompt, n_samples=3, progress_callback=None):
-    print(f"Generating main response + {n_samples} samples for:\n  \"{prompt}\"\n")
-    main_response, samples = generate_samples(prompt, n_samples, progress_callback)
+def detect_hallucinations_stream(prompt, model=DEFAULT_MODEL, n_samples=3):
+    start_time = time.time()
+    yield {"type": "status", "message": f"Sampling distributions via {model}..."}
 
+    main_response, samples = generate_samples(prompt, model=model, n_samples=n_samples)
     main_response_clean = clean_markdown(main_response)
     samples_clean = [clean_markdown(s) for s in samples]
 
-    if progress_callback:
-        progress_callback(0.45, "Preparing comparison data...")
+    yield {"type": "status", "message": "Encoding cross-attention premises..."}
     premises, premise_embeddings = prepare_premises(samples_clean)
 
     sentences = split_sentences(main_response_clean)
-    print(f"\nScoring {len(sentences)} sentences...\n")
+    yield {
+        "type": "init",
+        "total_sentences": len(sentences),
+        "original_response": main_response_clean,
+    }
 
-    results = []
     for i, sent in enumerate(sentences):
-        if progress_callback:
-            frac = 0.5 + 0.5 * (i / max(len(sentences), 1))
-            progress_callback(frac, f"Checking sentence {i+1}/{len(sentences)}...")
-
-        print(f"  sentence {i+1}/{len(sentences)}...")
-        atomic_claims = extract_atomic_claims(sent)
-        highest_score = max(
-            hallucination_score(c, premises, premise_embeddings) for c in atomic_claims
+        yield {
+            "type": "status",
+            "message": f"Auditing sentence {i + 1} of {len(sentences)}...",
+        }
+        claims = extract_atomic_claims(sent, model=model)
+        score = max(
+            hallucination_score(c, premises, premise_embeddings) for c in claims
         )
-        results.append({
+
+        sentence_payload = {
             "sentence": sent,
-            "score": highest_score,
-            "flagged": highest_score > 0.5,
-            "atomic_claims": atomic_claims,
-        })
+            "score": score,
+            "flagged": score > 0.5,
+            "atomic_claims": claims,
+        }
+        yield {"type": "sentence", "data": sentence_payload}
 
-    if progress_callback:
-        progress_callback(1.0, "Done")
-
-    return main_response_clean, results
-
-
-def print_report(main_response, results):
-    print("\n" + "=" * 60)
-    print("FULL RESPONSE:")
-    print(main_response)
-    print("=" * 60)
-    print("SENTENCE-LEVEL REPORT:\n")
-    for r in results:
-        tag = "⚠️  FLAGGED" if r["flagged"] else "✅ ok"
-        print(f"[{r['score']:.3f}] {tag}")
-        print(f"   {r['sentence']}")
-        if len(r["atomic_claims"]) > 1:
-            for c in r["atomic_claims"]:
-                print(f"      - {c}")
-        print()
-
-
-if __name__ == "__main__":
-    # UPDATED: Changed to a single sentence prompt to test system stability without overloading RAM
-    prompt = "The Eiffel Tower was completed in 1889 and is located in Madrid, Spain."
-
-    start = time.time()
-    main_response, results = detect_hallucinations(prompt, n_samples=3)
-    print(f"\nTotal time: {time.time() - start:.1f}s")
-
-    print_report(main_response, results)
+    elapsed = round(time.time() - start_time, 2)
+    yield {"type": "done", "latency": elapsed}
