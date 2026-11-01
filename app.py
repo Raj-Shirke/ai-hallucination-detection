@@ -50,6 +50,13 @@ label span {
     box-shadow: none !important;
 }
 
+#hint {
+    font-size: 0.78rem;
+    color: #999 !important;
+    margin: 6px 0 0 0;
+    text-align: center;
+}
+
 #summary {
     font-size: 1rem;
     font-weight: 600;
@@ -127,11 +134,18 @@ THEME = gr.themes.Base(
 )
 
 
-def run_detector(prompt, n_samples):
+def run_detector(prompt, n_samples, progress=gr.Progress()):
     if not prompt.strip():
         return gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
 
-    main_response, results = detect_hallucinations(prompt, n_samples=int(n_samples))
+    progress(0, desc="Starting...")
+
+    def report(fraction, message):
+        progress(fraction, desc=message)
+
+    main_response, results = detect_hallucinations(
+        prompt, n_samples=int(n_samples), progress_callback=report
+    )
 
     flagged_count = sum(r["flagged"] for r in results)
     total = len(results)
@@ -179,6 +193,8 @@ with gr.Blocks(css=CUSTOM_CSS, theme=THEME, title="Hallucination Detector") as d
             label="Consistency-check samples",
         )
         submit_btn = gr.Button("Check", variant="primary", elem_id="check-btn")
+
+    gr.HTML("<div id='hint'>This typically takes 30–90 seconds depending on response length.</div>")
 
     summary_output = gr.Markdown(elem_id="summary", visible=False)
     legend_output = gr.HTML(elem_id="legend-wrap", visible=False)

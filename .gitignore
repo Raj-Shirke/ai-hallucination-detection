@@ -1,14 +1,4 @@
-# Node
-node_modules/
-dist/
-.env
 
-# Python
 venv/
-__pycache__/
-*.pyc
-.pytest_cache/
 
-# OS Files
-.DS_Store
-Thumbs.db
+venv/
